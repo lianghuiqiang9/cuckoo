@@ -19,6 +19,7 @@
 package cuckoo
 
 import (
+	"fmt"
 	"math/rand"
 	"runtime"
 )
@@ -58,7 +59,7 @@ type Cuckoo struct {
 	eitem     bool  // evacuated leftover item,
 	ekey      Key   // ...and its key.
 	eval      Value
-	seed      [nhash]hash // seed for hash functions.
+	seed      [nhash]hash // seed for hash functions.  // 记录这个就行了。然后做simplehashing
 }
 
 var zero Value
@@ -67,11 +68,50 @@ func alloc(n int) []bucket {
 	return make([]bucket, n, n)
 }
 
+// PrintFirstNBuckets 打印前 n 个桶的底层物理状态，专用于硬核调试。
+func (c *Cuckoo) PrintFirstNBuckets(n int) {
+	// 防止你传入的 n 超过了实际桶的数量，导致数组越界崩溃
+	limit := n
+	if limit > len(c.buckets) {
+		limit = len(c.buckets)
+	}
+
+	fmt.Printf("\n========== 底层物理桶状态 (前 %d 个) ==========\n", limit)
+
+	// 1. 顺便打印一下零值 VIP 区的状态
+	fmt.Printf("[VIP 零值区] zeroIsSet: %v", c.zeroIsSet)
+	if c.zeroIsSet {
+		fmt.Printf(", zeroValue: %v\n", c.zeroValue)
+	} else {
+		fmt.Printf("\n")
+	}
+	fmt.Println("-------------------------------------------------")
+
+	// 2. 遍历并打印主桶区
+	for bi := 0; bi < limit; bi++ {
+		b := &c.buckets[bi]
+		fmt.Printf("Bucket %3d: | ", bi)
+
+		// 遍历桶内的所有槽位 (Slots)
+		for i, k := range b.keys {
+			if k == 0 {
+				// 打印空槽位，保持对齐方便观察
+				fmt.Printf("    [空]     | ")
+			} else {
+				// 打印有效数据
+				fmt.Printf("K:%-3v V:%-3v | ", k, b.vals[i])
+			}
+		}
+		fmt.Println()
+	}
+	fmt.Println("=================================================")
+}
+
 func init() {
 	// ensures the sanity of the config
 	if nhash*nhashshift+bshift+nhashshift > 63 {
 		panic("cuckoo: tryGreedyAdd needs nhash*nhashshift + bshift + nhashshift bits of random data; either modify tryGreedyAdd or reduce nhash/bshift.")
-	}
+	} //确保随机性不会爆掉
 
 	if nhashshift > 8 {
 		panic("cuckoo: nhashshift is too large. either modify Cuckoo.shuffle or reduce nhashshift.")
@@ -158,6 +198,41 @@ func (c *Cuckoo) Search(k Key) (v Value, ok bool) {
 
 	var h [nhash]hash // 否则检索桶中所有的元素，如果找到就返回val.
 	c.dohash(k, &h)
+	//fmt.Printf("h: %d\n", h)
+	for _, hval := range &h {
+		b := &c.buckets[int(hval)]
+		for i, key := range &b.keys {
+			if k == key {
+				return b.vals[i], true
+			}
+		}
+	}
+
+	for i, key := range c.stash.keys { // 最后尝试一下stash中有没有呢。
+		if key == k {
+			return c.stash.vals[i], true
+		}
+	}
+
+	return
+}
+
+// Search tries to retrieve the value associated with the given key.
+// If no such item is found, ok is set to false.
+func (c *Cuckoo) GetHashPosition(k Key) (v Value, ok bool) {
+	if k == 0 { // 如果key为0，那么返回c.zeroValue.
+		if c.zeroIsSet == false {
+			return
+		}
+
+		return c.zeroValue, true
+	}
+
+	// TODO(utkan): SSE2/AVX2 version
+
+	var h [nhash]hash // 否则检索桶中所有的元素，如果找到就返回val.
+	c.dohash(k, &h)
+	fmt.Printf("h: %d\n", h)
 	for _, hval := range &h {
 		b := &c.buckets[int(hval)]
 		for i, key := range &b.keys {
