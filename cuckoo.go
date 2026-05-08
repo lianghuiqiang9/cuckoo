@@ -24,9 +24,9 @@ import (
 )
 
 const (
-	blen      = 1 << bshift
+	blen      = 1 << bshift //有多少个桶
 	bmask     = blen - 1
-	nhash     = 1 << nhashshift
+	nhash     = 1 << nhashshift // 有多少个hash函数
 	nhashmask = nhash - 1
 )
 
@@ -95,9 +95,10 @@ func NewCuckoo(logsize int) *Cuckoo {
 	if logsize > hashBits {
 		panic("cuckoo: log size is too large")
 	}
+	//fmt.Printf("logsize: %d, bshift: %d\n", logsize, bshift)
 
 	c := &Cuckoo{
-		buckets: alloc(1 << uint(logsize)),
+		buckets: alloc(1 << uint(logsize)), // 总共有2^logsize, 每一个桶有2^bshift个，那么就剩下2^(logsize-bshift)个桶了。
 		logsize: logsize,
 	}
 
@@ -145,7 +146,7 @@ func (c *Cuckoo) shuffle(h *[nhash]hash, r int64) {
 // Search tries to retrieve the value associated with the given key.
 // If no such item is found, ok is set to false.
 func (c *Cuckoo) Search(k Key) (v Value, ok bool) {
-	if k == 0 {
+	if k == 0 { // 如果key为0，那么返回c.zeroValue.
 		if c.zeroIsSet == false {
 			return
 		}
@@ -155,7 +156,7 @@ func (c *Cuckoo) Search(k Key) (v Value, ok bool) {
 
 	// TODO(utkan): SSE2/AVX2 version
 
-	var h [nhash]hash
+	var h [nhash]hash // 否则检索桶中所有的元素，如果找到就返回val.
 	c.dohash(k, &h)
 	for _, hval := range &h {
 		b := &c.buckets[int(hval)]
@@ -166,7 +167,7 @@ func (c *Cuckoo) Search(k Key) (v Value, ok bool) {
 		}
 	}
 
-	for i, key := range c.stash.keys {
+	for i, key := range c.stash.keys { // 最后尝试一下stash中有没有呢。
 		if key == k {
 			return c.stash.vals[i], true
 		}
@@ -361,14 +362,14 @@ func (c *Cuckoo) tryGreedyAdd(k Key, v Value, h *[nhash]hash) (added bool) {
 
 	for step := 0; step < max; step++ {
 		r := rand.Int63() // need nhash*nhashshift + bshift + nhashshift random bits
-		c.shuffle(h, r)
+		c.shuffle(h, r)   // 进行洗牌，避免死胡同
 		r >>= nhash * nhashshift
 		// randomly choose the item to evict
-		i := int(r & bmask)
-		d := int((r >> bshift) & nhashmask)
-		hval := h[d]
+		i := int(r & bmask)                 // 随机选择一个 i
+		d := int((r >> bshift) & nhashmask) // 随机选择一个 d
+		hval := h[d]                        // 根据d选择一个桶
 		b := &c.buckets[int(hval)]
-		ekey, eval := b.keys[i], b.vals[i]
+		ekey, eval := b.keys[i], b.vals[i] //将ekey, eval踢出来，然后tryAdd重新插入。如果插入进来了，就好了，如果没有就会有有一个最大步数限制。
 		b.keys[i], b.vals[i] = k, v
 		// try to put the evicted item back
 		c.dohash(ekey, &ehash)
@@ -383,7 +384,7 @@ func (c *Cuckoo) tryGreedyAdd(k Key, v Value, h *[nhash]hash) (added bool) {
 	}
 
 	// try to insert into stash as a last resort
-	for i, key := range c.stash.keys {
+	for i, key := range c.stash.keys { //放到stash中去
 		if key == 0 {
 			c.stash.keys[i] = k
 			c.stash.vals[i] = v
@@ -400,29 +401,29 @@ func (c *Cuckoo) tryGreedyAdd(k Key, v Value, h *[nhash]hash) (added bool) {
 // LoadFactor returns the load factor of the hash table, which is the
 // ratio of the used cells to the allocated cells.
 func (c *Cuckoo) LoadFactor() float64 {
-	return float64(c.nentries) / float64(len(c.buckets)<<bshift)
+	return float64(c.nentries) / float64(len(c.buckets)<<bshift) //len(buckets)*2^bshift
 }
 
-// Tries to grow the hash table by a factor of 2^δ.
+// Tries to grow the hash table by a factor of 2^δ. // 如果小于装载因子就不扩容，如果大于就扩容2倍，无上限。
 func (c *Cuckoo) tryGrow(δ int) (ok bool) {
 	// NOTE(utkan): reads during grow are OK.
-	cnew := &Cuckoo{}
-	*cnew = *c
-	cnew.reseed()
+	cnew := &Cuckoo{} // 新建一个cuckoo变量
+	*cnew = *c        // 指向原先cuckoo
+	cnew.reseed()     // 对哈希种子重随机
 
 	if δ == 0 {
-		cnew.nrehash++
+		cnew.nrehash++ // 如果负载率低，就重新refresh
 	}
 
-	if δ > 0 {
+	if δ > 0 { // 如果不是，就扩容
 		cnew.ngrow++
 	}
 
-	if δ < 0 {
+	if δ < 0 { // 保护机制？？？太小就不运行缩容了。
 		if cnew.logsize <= 8 {
 			return
 		}
-		cnew.nshrink++
+		cnew.nshrink++ // 如果小，就收缩。
 	}
 
 	cnew.logsize += δ
@@ -467,7 +468,7 @@ func (c *Cuckoo) tryGrow(δ int) (ok bool) {
 		}
 	}
 
-	if cnew.eitem {
+	if cnew.eitem { // 最后挣扎一次吗?
 		if ok = cnew.tryInsert(cnew.ekey, cnew.eval); !ok {
 			return
 		}
